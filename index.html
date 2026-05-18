@@ -2390,7 +2390,7 @@ canvas.sig-canvas {
 // Replace this URL with your deployed Apps Script URL
 // Instructions in the README below
 // =============================================
-const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwpDP6bU5QbctDOIJ94gXQ0F94TPEn36Kqi3do8r57faxyvJYHxy-plpG9zKSZPpkGO/exec';
+const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxWRHTx54SNzasS5EVbpdwSGLqhNsE6jLnjGore0VQRDsfWHvbUyBCTv0yyg7MPM98d/exec';
 
 // =============================================
 // CANVAS SIGNATURE PAD
@@ -2940,18 +2940,58 @@ async function submitForm() {
   const sig3 = isMinor ? canvasToCleanPng(guardCanvasId) : ''; // Guardian (whichever applies)
   const sig4 = isCertified ? canvasToCleanPng('sigCanvas4') : ''; // Safe Practices
 
-  // ── File → base64 helper ──
+  // ── File → base64 helper (with mobile-safe image compression) ──
+  // iPhone photos can be 10–15MB. Resize images to max 1600px / 0.8 JPEG
+  // to keep the JSON payload under iOS Safari's memory/XHR limits.
   async function fileToBase64(inputId) {
     const el = document.getElementById(inputId);
     const file = el && el.files && el.files[0];
     if (!file) return null;
+
+    // PDFs and non-image files: skip compression, pass through raw
+    if (!file.type || !file.type.startsWith('image/')) {
+      return new Promise(res => {
+        const reader = new FileReader();
+        reader.onload = () => res({
+          data: reader.result.split(',')[1],
+          mimeType: file.type || 'application/octet-stream',
+          fileName: file.name
+        });
+        reader.onerror = () => res(null);
+        reader.readAsDataURL(file);
+      });
+    }
+
+    // Images: load → draw to a smaller canvas → re-encode as JPEG
+    const MAX_DIM = 1600;
+    const QUALITY = 0.8;
     return new Promise(res => {
       const reader = new FileReader();
-      reader.onload = () => res({
-        data: reader.result.split(',')[1],
-        mimeType: file.type || 'application/octet-stream',
-        fileName: file.name
-      });
+      reader.onload = () => {
+        const img = new Image();
+        img.onload = () => {
+          let { width: w, height: h } = img;
+          if (w > MAX_DIM || h > MAX_DIM) {
+            const scale = Math.min(MAX_DIM / w, MAX_DIM / h);
+            w = Math.round(w * scale);
+            h = Math.round(h * scale);
+          }
+          const c = document.createElement('canvas');
+          c.width = w; c.height = h;
+          const ctx = c.getContext('2d');
+          ctx.fillStyle = '#ffffff';   // flatten alpha (HEIC/PNG → JPEG)
+          ctx.fillRect(0, 0, w, h);
+          ctx.drawImage(img, 0, 0, w, h);
+          const dataUrl = c.toDataURL('image/jpeg', QUALITY);
+          res({
+            data: dataUrl.split(',')[1],
+            mimeType: 'image/jpeg',
+            fileName: (file.name || 'image').replace(/\.[^.]+$/, '') + '.jpg'
+          });
+        };
+        img.onerror = () => res(null);
+        img.src = reader.result;
+      };
       reader.onerror = () => res(null);
       reader.readAsDataURL(file);
     });
@@ -3102,7 +3142,7 @@ async function submitForm() {
         xhr.onload = resolve;
         xhr.onerror = resolve; // resolve anyway — no-cors means we won't see response
         xhr.ontimeout = resolve;
-        xhr.timeout = 30000;
+        xhr.timeout = 60000; // 60s — mobile networks can be slow with image uploads
         xhr.send(JSON.stringify(mainData));
       });
 
