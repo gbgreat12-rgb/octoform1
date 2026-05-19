@@ -2963,38 +2963,74 @@ async function submitForm() {
     }
 
     // Images: load → draw to a smaller canvas → re-encode as JPEG
-    // Aggressive defaults for mobile: a 12MP iPhone photo (~10MB)
-    // becomes ~120-200KB after this.
+    // Mobile-bulletproof: 15s hard timeout + fallback to raw upload
+    // so we NEVER hang the submit because of a quirky photo (HEIC etc).
     const MAX_DIM = 1200;
     const QUALITY = 0.7;
-    return new Promise(res => {
+    const COMPRESS_TIMEOUT_MS = 15000;
+
+    function readRaw() {
+      return new Promise(res => {
+        const r = new FileReader();
+        r.onload = () => res({
+          data: r.result.split(',')[1],
+          mimeType: file.type || 'application/octet-stream',
+          fileName: file.name
+        });
+        r.onerror = () => res(null);
+        r.readAsDataURL(file);
+      });
+    }
+
+    return new Promise(resolve => {
+      let done = false;
+      const finish = v => { if (!done) { done = true; resolve(v); } };
+
+      const timer = setTimeout(async () => {
+        if (!done) {
+          console.warn('[Compress] Timed out, sending raw:', file.name);
+          finish(await readRaw());
+        }
+      }, COMPRESS_TIMEOUT_MS);
+
       const reader = new FileReader();
+      reader.onerror = () => { clearTimeout(timer); finish(null); };
       reader.onload = () => {
         const img = new Image();
-        img.onload = () => {
-          let { width: w, height: h } = img;
-          if (w > MAX_DIM || h > MAX_DIM) {
-            const scale = Math.min(MAX_DIM / w, MAX_DIM / h);
-            w = Math.round(w * scale);
-            h = Math.round(h * scale);
-          }
-          const c = document.createElement('canvas');
-          c.width = w; c.height = h;
-          const ctx = c.getContext('2d');
-          ctx.fillStyle = '#ffffff';   // flatten alpha (HEIC/PNG → JPEG)
-          ctx.fillRect(0, 0, w, h);
-          ctx.drawImage(img, 0, 0, w, h);
-          const dataUrl = c.toDataURL('image/jpeg', QUALITY);
-          res({
-            data: dataUrl.split(',')[1],
-            mimeType: 'image/jpeg',
-            fileName: (file.name || 'image').replace(/\.[^.]+$/, '') + '.jpg'
-          });
+        img.onerror = async () => {
+          console.warn('[Compress] Decode failed, sending raw:', file.name);
+          clearTimeout(timer);
+          finish(await readRaw());
         };
-        img.onerror = () => res(null);
+        img.onload = () => {
+          try {
+            let { width: w, height: h } = img;
+            if (w > MAX_DIM || h > MAX_DIM) {
+              const scale = Math.min(MAX_DIM / w, MAX_DIM / h);
+              w = Math.round(w * scale);
+              h = Math.round(h * scale);
+            }
+            const c = document.createElement('canvas');
+            c.width = w; c.height = h;
+            const ctx = c.getContext('2d');
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, w, h);
+            ctx.drawImage(img, 0, 0, w, h);
+            const dataUrl = c.toDataURL('image/jpeg', QUALITY);
+            clearTimeout(timer);
+            finish({
+              data: dataUrl.split(',')[1],
+              mimeType: 'image/jpeg',
+              fileName: (file.name || 'image').replace(/\.[^.]+$/, '') + '.jpg'
+            });
+          } catch (e) {
+            console.warn('[Compress] Canvas encode failed, sending raw:', e);
+            clearTimeout(timer);
+            readRaw().then(finish);
+          }
+        };
         img.src = reader.result;
       };
-      reader.onerror = () => res(null);
       reader.readAsDataURL(file);
     });
   }
